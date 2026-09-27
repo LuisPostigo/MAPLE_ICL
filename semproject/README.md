@@ -64,6 +64,72 @@ influence MAPLE has already computed, which costs no model calls.
 `--signals`, `--weights` and `--threshold` configure the gate. `--out FILE`
 appends JSON lines.
 
+## What the model is actually asked to label
+
+The options are never generated. For the multiple-choice tasks they arrive with
+the question as part of the input; for the classification tasks the taxonomy is
+a fixed list printed into every prompt. The model only ever emits the label.
+
+That said, the three regimes are not equally useful for reliability work.
+
+| Task | Model emits | Label space | Chance of a correct guess |
+|---|---|---|---|
+| date | `(A)` | 6 options, shipped with the question | 17% |
+| salient | `(A)` | 6 options, shipped with the question | 17% |
+| tracking | `(F)` | 7 options, shipped with the question | 14% |
+| gpqa | `(A)` | 4 options, shipped with the question | 25% |
+| fp | `neutral` | 3 fixed classes | 33% |
+| goemo | `neutral` | 28 fixed classes | 3.6% |
+| banking77 | `card_arrival` | 77 fixed classes | 1.3% |
+| xsum | a one-sentence summary | open generation | ~0% |
+
+**Letter pick** — the options are part of `x`, so the label is one token:
+
+```
+Give only the choice the correct answer by selecting one of the options (e.g., '(A)', '(B)').
+Question: Yesterday was April 30, 2021. What is the date today in MM/DD/YYYY?
+Options:
+(A) 05/01/2021
+(B) 02/23/2021
+...
+```
+
+**Exact string from a fixed taxonomy** — the 77 class names are listed in every
+prompt and the model must reproduce one verbatim:
+
+```
+You can only make prediction from the following categories: activate_my_card,
+age_limit, ... wrong_exchange_rate_for_cash_withdrawal.
+service query: I am still waiting on my card?
+intent category:
+```
+
+**Open generation** — no label space at all, scored by ROUGE-L:
+
+```
+Give only the summary, and no extra commentary.
+Article: Clean-up operations are continuing across the Scottish Borders ...
+```
+
+### Why this matters for the gate
+
+The rightmost column above is the problem. On a 6-way task roughly one in six
+wrong guesses lands on the correct answer anyway, so a pseudo-label can be
+"correct" by accident. Those lucky guesses sit in the positive class of the
+detection AUC, and no reliability signal can distinguish them from labels the
+model actually knew. That is noise in the target variable, not in the features,
+and it caps how well any signal can score.
+
+Banking77 drops chance agreement to 1.3% and XSum effectively to zero, which
+makes pseudo-label correctness mean what we want it to mean. They also make the
+signals richer: confidence over a 77-token class name carries more than the
+logprob of a single letter, and consistency over 77 outcomes has a far lower
+floor than consistency over 6.
+
+`date` is currently the CLI default, which is the wrong choice for this reason
+and because its training pool is 98.6% gold (A). Prefer `-t banking77` for
+classification and `-t xsum` for open-ended labeling.
+
 ## How we know the gate works
 
 Pseudo-labeled samples come from a training split that has ground truth; MAPLE
