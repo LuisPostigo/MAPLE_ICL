@@ -160,3 +160,61 @@ def embed_text(task, example, with_label=False):
         return f"Sentence: {example['sentence']}\nAnswer: {answer}"
     answer = example["summary"] if with_label else ""
     return f"Article: {example['document']}\nSummary: {answer}"
+
+
+OPTION_BLOCK = re.compile(r"\n\s*Options:\s*\n(?:\([A-G]\)[^\n]*\n?)+", re.MULTILINE)
+OPTION_LINE = re.compile(r"\(([A-G])\)\s*([^\n]+)")
+
+
+def gold_answer_text(example):
+    """The text of the correct option, rather than its letter.
+
+    Returns None when the example has no option block to read, which is every
+    task outside the multiple-choice group.
+    """
+    options = dict(OPTION_LINE.findall(example.get("input", "")))
+    letter = OPTION_LETTER.findall((example.get("target") or "").strip())
+    if not letter or letter[0].upper() not in options:
+        return None
+    return options[letter[0].upper()].strip().rstrip(".")
+
+
+def strip_options(text):
+    return OPTION_BLOCK.sub("\n", text).rstrip()
+
+
+def open_prompt(task, labeled_demos, pseudo_demos, query):
+    """Same task with the answer options hidden, so the label must be generated.
+
+    Only worth using where the answer space is genuinely large. Across the
+    training pools there are 322 distinct gold answers for date and 47 for
+    tracking, but just 6 for salient, which stays a closed set either way.
+    """
+    lines = ["You are an expert at answering questions. Here are several examples.\n"]
+    for demo in labeled_demos:
+        lines.append(f"Question: {strip_options(demo['input'])}\n"
+                     f"Answer: {gold_answer_text(demo)}\n")
+    for demo in pseudo_demos:
+        lines.append(f"Question: {strip_options(demo['example']['input'])}\n"
+                     f"Answer: {demo['pred']}\n")
+    lines.append("Give only the answer itself, with no options, commentary or "
+                 "explanation.\n")
+    lines.append(f"Question: {strip_options(query['input'])}\nAnswer: ")
+    return "".join(lines)
+
+
+def normalise_answer(text):
+    return " ".join((text or "").lower().replace(".", " ").split())
+
+
+def score_open(text, example):
+    """Match a generated answer against the gold option text.
+
+    Accepts the gold answer appearing anywhere in the reply, since a model that
+    reasons aloud still ends on the right string.
+    """
+    gold = gold_answer_text(example)
+    if gold is None:
+        return 0.0
+    gold_norm = normalise_answer(gold)
+    return float(bool(gold_norm) and gold_norm in normalise_answer(text))

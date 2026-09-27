@@ -37,7 +37,7 @@ def detection_auc(scores, correctness):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="MAPLE + reliability gate")
-    parser.add_argument("-t", "--task", default="date")
+    parser.add_argument("-t", "--task", default="banking77")
     parser.add_argument("-m", "--model", default="mock",
                         help="backend name; see semproject.model.available()")
     parser.add_argument("--model-id", default=None, help="backend-specific model id")
@@ -53,6 +53,9 @@ def parse_args():
                         default=["confidence", "consistency", "influence"])
     parser.add_argument("--weights", default=None,
                         help='JSON, e.g. \'{"confidence": 2}\'')
+    parser.add_argument("--open-labels", action="store_true",
+                        help="hide the answer options so labels must be generated "
+                             "(multiple-choice tasks only)")
     parser.add_argument("--no-gate", action="store_true", help="plain MAPLE (Task 1)")
     parser.add_argument("--out", default=None)
     return parser.parse_args()
@@ -74,17 +77,26 @@ def build_splits(task, seed, pool_size, limit_test):
     return train_examples, test_examples
 
 
-def pseudo_label(model, task, labeled_demos, train_examples, selected_indices):
+def make_prompt_and_scorer(task, open_labels):
+    if open_labels:
+        return data.open_prompt, data.score_open
+    return data.prompt, lambda text, example: data.score(task, text, example)
+
+
+def pseudo_label(model, task, labeled_demos, train_examples, selected_indices,
+                 build_prompt=None):
     labeled_items = []
     for index in selected_indices:
         example = train_examples[index]
-        reply = model.generate(data.prompt(task, labeled_demos, [], example))
+        build = build_prompt or data.prompt
+        reply = model.generate(build(task, labeled_demos, [], example))
         labeled_items.append({"example": example, "pred": reply.text,
                               "logprobs": reply.logprobs})
     return labeled_items
 
 
-def predict_test_set(model, task, labeled_demos, pool_items, test_examples, alpha):
+def predict_test_set(model, task, labeled_demos, pool_items, test_examples, alpha,
+                     build_prompt=None, score_fn=None):
     demo_count = len(labeled_demos) + len(pool_items)
 
     labeled_texts = [data.embed_text(task, demo, True) for demo in labeled_demos]
@@ -104,8 +116,9 @@ def predict_test_set(model, task, labeled_demos, pool_items, test_examples, alph
         chosen_labeled = [labeled_demos[i] for i in keep if i < len(labeled_demos)]
         chosen_pseudo = [pool_items[i - len(labeled_demos)] for i in keep
                          if i >= len(labeled_demos)]
-        reply = model.generate(data.prompt(task, chosen_labeled, chosen_pseudo, query))
-        scores.append(data.score(task, reply.text, query))
+        build = build_prompt or data.prompt
+        reply = model.generate(build(task, chosen_labeled, chosen_pseudo, query))
+        scores.append((score_fn or (lambda t, e: data.score(task, t, e)))(reply.text, query))
     return scores
 
 
@@ -132,13 +145,13 @@ def main():
     selected_indices = maple.select_for_labeling(
         train_graph, labeled_indices, args.pseudo, scores=influence)
 
+    build_prompt, score_fn = make_prompt_and_scorer(args.task, args.open_labels)
     labeled_items = pseudo_label(model, args.task, labeled_demos,
-                                 train_examples, selected_indices)
+                                 train_examples, selected_indices, build_prompt)
 
     # Ground truth is withheld above and revealed only here, so scoring the
     # pseudo-labels costs no extra model calls.
-    correctness = [data.score(args.task, item["pred"], item["example"])
-                   for item in labeled_items]
+    correctness = [score_fn(item["pred"], item["example"]) for item in labeled_items]
 
     decisions = []
     pool_items = labeled_items
@@ -155,12 +168,13 @@ def main():
         pool_items, _, decisions = gate.apply(labeled_items, context)
 
     scores = predict_test_set(model, args.task, labeled_demos, pool_items,
-                              test_examples, args.alpha)
+                              test_examples, args.alpha, build_prompt, score_fn)
 
     result = {
         "task": args.task, "model": model.name, "seed": args.seed,
         "labeled": args.labeled, "pseudo": args.pseudo, "alpha": args.alpha,
-        "gate": not args.no_gate, "n_test": len(test_examples),
+        "gate": not args.no_gate, "open_labels": args.open_labels,
+        "n_test": len(test_examples),
         "accuracy": float(np.mean(scores)) if scores else 0.0,
         "pseudo_label_accuracy": float(np.mean(correctness)) if correctness else None,
         "pool_size": len(pool_items),

@@ -126,9 +126,34 @@ signals richer: confidence over a 77-token class name carries more than the
 logprob of a single letter, and consistency over 77 outcomes has a far lower
 floor than consistency over 6.
 
-`date` is currently the CLI default, which is the wrong choice for this reason
-and because its training pool is 98.6% gold (A). Prefer `-t banking77` for
-classification and `-t xsum` for open-ended labeling.
+### The fix, in two parts
+
+**Banking77 is now the default task.** It keeps full comparability with the
+paper, which uses it as a headline result, while dropping chance agreement to
+1.3 percent. The model must reproduce one of 77 class names exactly, so being
+correct means it knew the answer. `date` was the wrong default both for the
+chance rate and because its training pool is 98.6 percent gold (A).
+
+**`--open-labels` hides the answer options**, so the label has to be generated
+rather than picked. Scoring matches the generated text against the gold option
+text, accepting the answer anywhere in the reply.
+
+```bash
+python -m semproject.run -t date --open-labels
+```
+
+Only worth using where the answer space is actually large:
+
+| Task | Distinct gold answers in the pool | Useful with `--open-labels` |
+|---|---|---|
+| date | 322 | yes, becomes genuinely generative |
+| tracking | 47 | partly |
+| salient | 6 | no, stays a closed set either way |
+
+Early evidence that the chance rate was the binding problem: on the same tiny
+configuration, gate detection AUC is 0.50 on Financial PhraseBank (33 percent
+chance) and 0.78 on Banking77 (1.3 percent chance). Both runs are far too small
+to conclude anything, but the direction is the predicted one.
 
 ## How we know the gate works
 

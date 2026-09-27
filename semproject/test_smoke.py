@@ -43,6 +43,18 @@ def test_gate_scores_and_splits():
     print(f"OK  gate ran: kept {len(kept)}, filtered {len(filtered)}")
 
 
+def test_open_labels_hide_options():
+    train, _ = data.load("date")
+    example = train[0]
+    prompt = data.open_prompt("date", train[1:2], [], example)
+    assert "Options:" not in prompt and "(A)" not in prompt
+    gold = data.gold_answer_text(example)
+    assert data.score_open(gold, example) == 1.0
+    assert data.score_open(f"The answer is {gold}.", example) == 1.0
+    assert data.score_open("01/01/1999", example) == 0.0
+    print("OK  open labels hide options and score by generated answer")
+
+
 def test_alpha_keeps_expected_fraction():
     embeddings = maple.embed([f"text number {i}" for i in range(24)])
     graph = maple.knn_graph(embeddings, 5)
@@ -57,5 +69,6 @@ if __name__ == "__main__":
     test_choice_scorer_is_corrected()
     test_model_is_swappable()
     test_gate_scores_and_splits()
+    test_open_labels_hide_options()
     test_alpha_keeps_expected_fraction()
     print("\nall smoke tests passed")
