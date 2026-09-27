@@ -1,0 +1,9 @@
+.venv/
+data/
+results/
+emb_cache/
+llm_cache/
+semproject/.emb/
+__pycache__/
+*.pyc
+.env
