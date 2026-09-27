@@ -1,35 +1,35 @@
-"""Signal 3 of 3: influence / usefulness.  PLACEHOLDER.
-
-The intended version measures how much a demonstration changes the model's
-behaviour, in the spirit of influence functions, where the effect of upweighting
-a training point is scaled by the learning rate. That needs gradient access and
-is not implementable against an API backend.
-
-v0 substitutes the one influence measure that is already available for free:
-MAPLE has embedded every sample and built the neighbour graph before pseudo-
-labeling begins, so a sample's graph influence on the labeled set costs nothing
-to read back. Normalised to [0, 1] across the pool.
-
-Worth testing alongside it, also free: neighbourhood label agreement, meaning
-whether this pseudo-label matches the labels of its graph neighbours. A label
-that disagrees with everything around it is suspect, and computing that requires
-no additional model calls at all.
-"""
+"""Signal 3 of 3: how much the demonstration matters.  PLACEHOLDER."""
 import numpy as np
 
 from .base import Signal
+
+NEUTRAL = 0.5
 
 
 class InfluenceSignal(Signal):
     name = "influence"
 
-    def score_all(self, items, ctx):
-        raw = ctx.extra.get("graph_influence")
-        if raw is None or len(raw) != len(items):
-            return [0.5] * len(items)           # neutral when unavailable
-        v = np.asarray(raw, float)
-        lo, hi = float(v.min()), float(v.max())
-        return [0.5] * len(items) if hi - lo < 1e-9 else ((v - lo) / (hi - lo)).tolist()
+    def score_all(self, items, context):
+        """MAPLE's graph influence, rescaled to [0, 1] across the pool.
 
-    def score(self, item, ctx):
-        return 0.5
+        PLACEHOLDER. The intended version measures how much a demonstration
+        changes model behaviour, in the spirit of influence functions where the
+        effect of upweighting a point scales with the learning rate. That needs
+        gradient access and cannot run against an API backend.
+
+        This stand-in is free: the graph exists before pseudo-labeling starts.
+        Also free and worth testing alongside it, neighbourhood label agreement,
+        meaning whether this label matches those of its graph neighbours.
+        """
+        raw_scores = context.extra.get("graph_influence")
+        if raw_scores is None or len(raw_scores) != len(items):
+            return [NEUTRAL] * len(items)
+
+        scores = np.asarray(raw_scores, dtype=float)
+        lowest, highest = float(scores.min()), float(scores.max())
+        if highest - lowest < 1e-9:
+            return [NEUTRAL] * len(items)
+        return ((scores - lowest) / (highest - lowest)).tolist()
+
+    def score(self, item, context):
+        return NEUTRAL

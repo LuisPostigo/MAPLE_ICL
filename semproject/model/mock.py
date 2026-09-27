@@ -1,4 +1,4 @@
-"""Deterministic offline backend, so the whole pipeline runs with no model and no key."""
+"""Deterministic offline backend, so the pipeline runs with no weights and no key."""
 import hashlib
 
 from .base import Model, Response
@@ -15,10 +15,11 @@ class MockModel(Model):
         self.labels = labels
 
     def generate(self, prompt, temperature=0.0, max_tokens=64):
-        h = int(hashlib.sha256(f"{prompt}{temperature:.3f}".encode()).hexdigest(), 16)
+        digest = int(hashlib.sha256(
+            f"{prompt}{temperature:.3f}".encode()).hexdigest(), 16)
         labels = self.labels or ["(A)", "(B)", "(C)", "(D)"]
-        text = labels[h % len(labels)]
-        # A plausible logprob spread so the confidence signal has something to read.
-        lp = -0.05 - (h % 100) / 100.0
-        return Response(text=text, logprobs=[lp] * max(1, len(text.split())),
+        answer = labels[digest % len(labels)]
+        token_logprob = -0.05 - (digest % 100) / 100.0
+        return Response(text=answer,
+                        logprobs=[token_logprob] * max(1, len(answer.split())),
                         meta={"backend": "mock"})

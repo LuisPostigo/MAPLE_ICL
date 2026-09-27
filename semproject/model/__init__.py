@@ -1,4 +1,8 @@
-"""Backend registry. Import cost is deferred so a missing SDK breaks only its own backend."""
+"""Backend registry.
+
+Imports are deferred so a missing SDK breaks only its own backend, and nothing
+outside this package needs to know which model is in use.
+"""
 from .base import Model, Response
 
 _BACKENDS = {
@@ -8,35 +12,36 @@ _BACKENDS = {
 }
 
 
-def get_model(name="mock", **kw) -> Model:
+def get_model(name="mock", **kwargs) -> Model:
     if name not in _BACKENDS:
         raise ValueError(f"unknown model {name!r}; have {sorted(_BACKENDS)}")
     import importlib
-    mod, cls = _BACKENDS[name]
-    return getattr(importlib.import_module(mod, __package__), cls)(**kw)
+    module_name, class_name = _BACKENDS[name]
+    module = importlib.import_module(module_name, __package__)
+    return getattr(module, class_name)(**kwargs)
 
 
 def available():
-    """Report which backends could run, without constructing any of them.
+    """Which backends could run, checked without constructing any of them.
 
-    Constructing a backend downloads weights or opens a client, so this checks
-    only that the dependency imports and any credential is present.
+    Constructing a backend downloads weights or opens a client, so this looks
+    only at whether the dependency imports and any credential is present.
     """
     import importlib.util
     import os
-    out = {}
-    for name in _BACKENDS:
-        if name == "mock":
-            out[name] = "ready"
-        elif name == "hf":
-            out[name] = ("ready (downloads weights on first use)"
-                         if importlib.util.find_spec("transformers") else "needs transformers")
-        elif name == "gemini":
-            has_sdk = importlib.util.find_spec("google.genai") is not None
-            has_key = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-            out[name] = ("ready" if has_sdk and has_key else
-                         "needs GEMINI_API_KEY" if has_sdk else "needs google-genai")
-    return out
+
+    has_transformers = importlib.util.find_spec("transformers") is not None
+    has_genai = importlib.util.find_spec("google.genai") is not None
+    has_gemini_key = bool(os.environ.get("GEMINI_API_KEY")
+                          or os.environ.get("GOOGLE_API_KEY"))
+
+    return {
+        "mock": "ready",
+        "hf": "ready (downloads weights on first use)" if has_transformers
+              else "needs transformers",
+        "gemini": "ready" if has_genai and has_gemini_key
+                  else "needs GEMINI_API_KEY" if has_genai else "needs google-genai",
+    }
 
 
 __all__ = ["Model", "Response", "get_model", "available"]

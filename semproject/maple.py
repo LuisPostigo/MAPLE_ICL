@@ -1,14 +1,4 @@
-"""MAPLE's two selection mechanisms, and the embedding/graph machinery they share.
-
-Influence follows the paper's Theorem 3.2: a node's influence on a set is bounded
-by the number of shortest paths between them and their shortest-path distance,
-
-    influence(u, V) = mean_i log P_S(u, v_i) - mean_i L_S(u, v_i) * log(avg_degree)
-
-Path counts come from one breadth-first sweep per source using the standard
-recurrence sigma(v) = sum of sigma over v's predecessors, which is exact and
-avoids enumerating every path.
-"""
+"""MAPLE's two selection steps and the embedding graph they share."""
 import hashlib
 import math
 import os
@@ -18,123 +8,172 @@ import networkx as nx
 import numpy as np
 import torch
 
-CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".emb")
+EMBEDDING_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".emb")
 EMBEDDER = "facebook/contriever-msmarco"
-_ENC = {}
+
+_encoder_cache = {}
 
 
-# ------------------------------------------------------------------ embeddings
-def _encoder():
-    if not _ENC:
+def _load_encoder():
+    if not _encoder_cache:
         from transformers import AutoModel, AutoTokenizer
-        dev = ("mps" if torch.backends.mps.is_available()
-               else "cuda" if torch.cuda.is_available() else "cpu")
-        _ENC.update(tok=AutoTokenizer.from_pretrained(EMBEDDER),
-                    mdl=AutoModel.from_pretrained(EMBEDDER).to(dev).eval(), dev=dev)
-    return _ENC
+        device = ("mps" if torch.backends.mps.is_available()
+                  else "cuda" if torch.cuda.is_available() else "cpu")
+        _encoder_cache.update(
+            tokenizer=AutoTokenizer.from_pretrained(EMBEDDER),
+            model=AutoModel.from_pretrained(EMBEDDER).to(device).eval(),
+            device=device)
+    return _encoder_cache
 
 
 def embed(texts, batch_size=32, cache_tag=None):
-    """Mean-pooled Contriever embeddings. Padding is masked out, so batching is exact."""
+    """Mean-pooled Contriever embeddings.
+
+    Padding is masked out of the mean, so batching gives the same result as
+    encoding everything at once.
+    """
     if isinstance(texts, str):
         texts = [texts]
-    path = None
+
+    cache_path = None
     if cache_tag:
-        os.makedirs(CACHE, exist_ok=True)
-        h = hashlib.sha256("\x00".join(texts).encode()).hexdigest()[:24]
-        path = os.path.join(CACHE, f"{cache_tag}_{h}.npy")
-        if os.path.exists(path):
-            return torch.from_numpy(np.load(path))
-    e, out = _encoder(), []
-    for i in range(0, len(texts), batch_size):
-        inp = e["tok"](texts[i:i + batch_size], padding=True, truncation=True,
-                       return_tensors="pt").to(e["dev"])
+        os.makedirs(EMBEDDING_CACHE, exist_ok=True)
+        digest = hashlib.sha256("\x00".join(texts).encode()).hexdigest()[:24]
+        cache_path = os.path.join(EMBEDDING_CACHE, f"{cache_tag}_{digest}.npy")
+        if os.path.exists(cache_path):
+            return torch.from_numpy(np.load(cache_path))
+
+    encoder = _load_encoder()
+    batches = []
+    for start in range(0, len(texts), batch_size):
+        tokenized = encoder["tokenizer"](
+            texts[start:start + batch_size], padding=True, truncation=True,
+            return_tensors="pt").to(encoder["device"])
         with torch.no_grad():
-            h_ = e["mdl"](**inp)[0]
-        m = inp["attention_mask"]
-        out.append((h_.masked_fill(~m[..., None].bool(), 0.).sum(1)
-                    / m.sum(1)[..., None]).float().cpu())
-    emb = torch.cat(out)
-    if path:
-        np.save(path, emb.numpy())
-    return emb
+            hidden_states = encoder["model"](**tokenized)[0]
+        attention_mask = tokenized["attention_mask"]
+        masked = hidden_states.masked_fill(~attention_mask[..., None].bool(), 0.0)
+        pooled = masked.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
+        batches.append(pooled.float().cpu())
+
+    embeddings = torch.cat(batches)
+    if cache_path:
+        np.save(cache_path, embeddings.numpy())
+    return embeddings
 
 
-# ----------------------------------------------------------------- graph + influence
-def knn_graph(emb, degree=20):
-    """Top-`degree` inner-product neighbour graph, excluding each node's self-match."""
-    sim = (emb @ emb.T).numpy()
-    G = nx.Graph()
-    G.add_nodes_from(range(sim.shape[0]))
-    for i in range(sim.shape[0]):
-        for j in np.argsort(np.ravel(sim[i]))[-degree - 1:-1]:
-            if j != i:
-                G.add_edge(i, int(j))
-    if not nx.is_connected(G):  # every shortest path must exist
-        comps = list(nx.connected_components(G))
-        for a, b in zip(comps, comps[1:]):
-            G.add_edge(next(iter(a)), next(iter(b)))
-    return G
+def knn_graph(embeddings, degree=20):
+    """Connect each sample to its `degree` nearest neighbours by inner product.
 
-
-def _bfs(adj, src, n):
-    """Distances and exact shortest-path counts from `src`."""
-    dist, sig = [-1] * n, [0] * n
-    dist[src], sig[src] = 0, 1
-    q = deque([src])
-    while q:
-        u = q.popleft()
-        for v in adj[u]:
-            if dist[v] < 0:
-                dist[v], sig[v] = dist[u] + 1, sig[u]
-                q.append(v)
-            elif dist[v] == dist[u] + 1:
-                sig[v] += sig[u]
-    return dist, sig
-
-
-def _adj(G, n):
-    a = [[] for _ in range(n)]
-    for u, v in G.edges():
-        a[u].append(v)
-        a[v].append(u)
-    return a
-
-
-def influence_scores(G, labeled_idx):
-    """Influence of every node on the labeled set. Shared by step 2 and the gate.
-
-    Computing this once means the influence signal costs no model calls: the
-    graph already exists by the time pseudo-labeling starts.
+    Disconnected components are joined afterwards because the influence scores
+    below require a path between every pair of nodes.
     """
-    n = G.number_of_nodes()
-    adj, log_d = _adj(G, n), math.log(2 * G.number_of_edges() / n)
-    paths, lens = np.zeros(n), np.zeros(n)
-    for t in labeled_idx:                       # undirected, so one BFS per labeled node
-        dist, sig = _bfs(adj, int(t), n)
-        for v in range(n):
-            if dist[v] >= 0:
-                lens[v] += dist[v]
-                paths[v] += math.log(sig[v]) if sig[v] else 0.0
-    return paths / len(labeled_idx) - (lens / len(labeled_idx)) * log_d
+    similarity = (embeddings @ embeddings.T).numpy()
+    node_count = similarity.shape[0]
+
+    graph = nx.Graph()
+    graph.add_nodes_from(range(node_count))
+    for node in range(node_count):
+        ranked = np.argsort(np.ravel(similarity[node]))
+        for neighbour in ranked[-degree - 1:-1]:
+            if neighbour != node:
+                graph.add_edge(node, int(neighbour))
+
+    if not nx.is_connected(graph):
+        components = list(nx.connected_components(graph))
+        for current, following in zip(components, components[1:]):
+            graph.add_edge(next(iter(current)), next(iter(following)))
+    return graph
 
 
-def select_for_labeling(G, labeled_idx, k, scores=None):
-    """Step 2: the k unlabeled nodes with greatest influence on the labeled set."""
-    inf = influence_scores(G, labeled_idx) if scores is None else scores
-    rest = np.delete(np.arange(G.number_of_nodes()), labeled_idx)
-    return rest[np.argsort(inf[rest])[-k:]]
+def adjacency_list(graph, node_count):
+    neighbours = [[] for _ in range(node_count)]
+    for left, right in graph.edges():
+        neighbours[left].append(right)
+        neighbours[right].append(left)
+    return neighbours
 
 
-def adaptive_select(G, pool_emb, query_emb, n_demos, alpha=0.75, link=10):
-    """Step 6: keep the top `alpha` fraction of the pool by influence on this query."""
-    g = G.copy()
-    q = g.number_of_nodes()
-    log_d = math.log(2 * g.number_of_edges() / q)
-    for j in np.argsort(np.ravel((query_emb @ pool_emb.T).numpy()))[-link:]:
-        g.add_edge(q, int(j))
-    dist, sig = _bfs(_adj(g, q + 1), q, q + 1)
-    inf = np.array([float(sig[v]) - dist[v] * log_d if dist[v] >= 0 else -np.inf
-                    for v in range(n_demos)])
-    keep = max(1, int(round(alpha * n_demos)))
-    return np.sort(np.argsort(inf)[-keep:])
+def shortest_paths_from(neighbours, source, node_count):
+    """Distance and exact shortest-path count from `source` to every node.
+
+    Counts come from the recurrence paths(v) = sum of paths over v's
+    predecessors, which avoids enumerating the paths themselves.
+    """
+    distance = [-1] * node_count
+    path_count = [0] * node_count
+    distance[source] = 0
+    path_count[source] = 1
+
+    queue = deque([source])
+    while queue:
+        node = queue.popleft()
+        for neighbour in neighbours[node]:
+            if distance[neighbour] < 0:
+                distance[neighbour] = distance[node] + 1
+                path_count[neighbour] = path_count[node]
+                queue.append(neighbour)
+            elif distance[neighbour] == distance[node] + 1:
+                path_count[neighbour] += path_count[node]
+    return distance, path_count
+
+
+def influence_scores(graph, labeled_indices):
+    """Influence of every node on the labeled set, per the paper's Theorem 3.2.
+
+        influence(u) = mean log(paths to labeled) - mean distance * log(avg degree)
+
+    Computed once and reused by both the selection step and the influence
+    signal, so reading it back in the gate costs no model calls.
+    """
+    node_count = graph.number_of_nodes()
+    neighbours = adjacency_list(graph, node_count)
+    log_average_degree = math.log(2 * graph.number_of_edges() / node_count)
+
+    total_log_paths = np.zeros(node_count)
+    total_distance = np.zeros(node_count)
+    for labeled_node in labeled_indices:
+        distance, path_count = shortest_paths_from(neighbours, int(labeled_node), node_count)
+        for node in range(node_count):
+            if distance[node] >= 0:
+                total_distance[node] += distance[node]
+                total_log_paths[node] += math.log(path_count[node]) if path_count[node] else 0.0
+
+    labeled_count = len(labeled_indices)
+    return total_log_paths / labeled_count - (total_distance / labeled_count) * log_average_degree
+
+
+def select_for_labeling(graph, labeled_indices, count, scores=None):
+    """The `count` unlabeled samples with the greatest influence on the labeled set."""
+    influence = influence_scores(graph, labeled_indices) if scores is None else scores
+    candidates = np.delete(np.arange(graph.number_of_nodes()), labeled_indices)
+    return candidates[np.argsort(influence[candidates])[-count:]]
+
+
+def adaptive_select(graph, pool_embeddings, query_embedding, demo_count,
+                    alpha=0.75, links=10):
+    """Keep the `alpha` fraction of the demo pool most influential for one query.
+
+    The query is attached to its nearest demos, then scored by influence flowing
+    back from it. Average degree is taken before attachment so the query's own
+    edges do not shift the scale.
+    """
+    graph_with_query = graph.copy()
+    query_node = graph_with_query.number_of_nodes()
+    log_average_degree = math.log(
+        2 * graph_with_query.number_of_edges() / query_node)
+
+    similarity = np.ravel((query_embedding @ pool_embeddings.T).numpy())
+    for neighbour in np.argsort(similarity)[-links:]:
+        graph_with_query.add_edge(query_node, int(neighbour))
+
+    distance, path_count = shortest_paths_from(
+        adjacency_list(graph_with_query, query_node + 1), query_node, query_node + 1)
+
+    influence = np.array([
+        float(path_count[node]) - distance[node] * log_average_degree
+        if distance[node] >= 0 else -np.inf
+        for node in range(demo_count)])
+
+    keep_count = max(1, int(round(alpha * demo_count)))
+    return np.sort(np.argsort(influence)[-keep_count:])

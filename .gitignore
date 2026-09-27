@@ -1,9 +1,26 @@
+# Environments and data
 .venv/
 data/
+.env
+
+# Run output and caches, matched by pattern so location never matters
+*.log
+*.jsonl
+*.out
+*.npy
+*.npz
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+**/.emb/
+**/*_cache/
 results/
-emb_cache/
-llm_cache/
-semproject/.emb/
+runs/
+outputs/
+
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
+.ipynb_checkpoints/

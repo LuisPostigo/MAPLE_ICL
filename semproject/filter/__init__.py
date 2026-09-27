@@ -1,8 +1,7 @@
-"""Reliability gate: the research contribution sitting between pseudo-labeling
-and demonstration selection.
+"""Reliability gate, sitting between pseudo-labeling and demonstration selection.
 
-Adding a fourth signal (cross-model agreement, neighbourhood label agreement)
-means writing one class with a `score`/`score_all` method and listing it here.
+Adding a signal means writing one class with a score or score_all method and
+listing it in SIGNALS.
 """
 from .base import Context, Signal
 from .confidence import ConfidenceSignal
@@ -18,9 +17,10 @@ SIGNALS = {
 
 
 def build_gate(names=("confidence", "consistency", "influence"),
-               weights=None, threshold=0.5, **kw):
-    return Gate([SIGNALS[n](**kw.get(n, {})) for n in names],
-                weights=weights, threshold=threshold)
+               weights=None, threshold=0.5, signal_options=None):
+    signal_options = signal_options or {}
+    signals = [SIGNALS[name](**signal_options.get(name, {})) for name in names]
+    return Gate(signals, weights=weights, threshold=threshold)
 
 
 __all__ = ["Context", "Signal", "Gate", "Decision", "weighted_mean",
