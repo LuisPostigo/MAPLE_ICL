@@ -12,6 +12,63 @@ semproject/
   run.py      end-to-end driver
 ```
 
+## Setup
+
+### Models: nothing to download by hand
+
+There is no link to fetch and no folder to place anything in. Transformers pulls
+the weights itself the first time they are used, into
+`~/.cache/huggingface/hub`, and reuses them afterwards.
+
+| Model | Role | On disk | When it arrives |
+|---|---|---|---|
+| `facebook/contriever-msmarco` | embeddings for MAPLE's graph | 836 MB | first run of anything |
+| `Qwen/Qwen2.5-0.5B-Instruct` | writes labels, and is the student | 953 MB | first run that needs a local model |
+
+Swap either with `--model-id`, and the new weights download the same way:
+
+```bash
+python -m semproject.run --model-id Qwen/Qwen2.5-7B-Instruct
+```
+
+To pull them ahead of time rather than on first use:
+
+```bash
+hf download facebook/contriever-msmarco
+hf download Qwen/Qwen2.5-0.5B-Instruct
+```
+
+### Data: one command
+
+`data/` is deliberately not in git, so a fresh clone has no datasets. Fetch
+them, which also verifies every split against Table 5 of the paper:
+
+```bash
+python -m semproject.setup_data
+```
+
+About 519 MB, most of it XSum. Pass a subset to skip the rest:
+`python -m semproject.setup_data bbh fp`.
+
+Seven of the eight tasks need nothing further. GPQA is gated: accept the licence
+at `Idavidrein/gpqa`, run `hf auth login`, then re-run the script.
+
+### Full install
+
+```bash
+git clone https://github.com/LuisPostigo/MAPLE_ICL.git
+cd MAPLE_ICL && git checkout ml-semProject
+python3 -m venv .venv
+.venv/bin/pip install torch transformers datasets networkx numpy scipy \
+    scikit-learn pandas rouge tqdm peft accelerate
+.venv/bin/python -m semproject.setup_data
+.venv/bin/python -m semproject.test_smoke
+```
+
+The smoke tests need no model weights and no network, so they are the fastest
+check that the install is sound. Expect roughly 3 GB total once the models have
+been pulled.
+
 ## The model boundary
 
 Nothing outside `model/` imports a backend. Everything goes through
